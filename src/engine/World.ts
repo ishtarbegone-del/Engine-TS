@@ -321,7 +321,9 @@ class World {
             }
         }
 
-        if (Environment.WEB_PORT === 80) {
+        if (Environment.VR_SINGLEPLAYER) {
+            printInfo(kleur.green().bold('World ready') + kleur.white().bold(': hidden VR single-player (no browser)'));
+        } else if (Environment.WEB_PORT === 80) {
             printInfo(kleur.green().bold('World ready') + kleur.white().bold(': Visit http://localhost/rs2.cgi'));
         } else {
             printInfo(kleur.green().bold('World ready') + kleur.white().bold(': Visit http://localhost:' + Environment.WEB_PORT + '/rs2.cgi'));

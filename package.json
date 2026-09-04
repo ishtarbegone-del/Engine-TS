@@ -26,7 +26,10 @@
     "sqlite:migrate": "prisma migrate deploy --schema prisma/singleworld/schema.prisma",
     "sqlite:reset": "prisma migrate reset --force --schema prisma/singleworld/schema.prisma",
     "sqlite:schema": "prisma migrate dev --schema prisma/singleworld/schema.prisma",
-    "start": "bun install && bun run src/app.ts"
+    "start": "bun install && bun run src/app.ts",
+    "vr": "bun run tools/vr/StartVr.ts",
+    "vr:export": "bun run tools/vr/ExportGltf.ts",
+    "vr:compile": "bun build --compile src/app.ts --outfile dist/world.exe"
   },
   "lint-staged": {
     "*.{js,ts}": [

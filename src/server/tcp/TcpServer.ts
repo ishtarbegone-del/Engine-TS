@@ -67,6 +67,7 @@ export default class TcpServer {
             });
         });
 
-        this.tcp.listen(Environment.NODE_PORT, '0.0.0.0', () => {});
+        const host = Environment.VR_SINGLEPLAYER ? Environment.VR_BIND : '0.0.0.0';
+        this.tcp.listen(Environment.NODE_PORT, host, () => {});
     }
 }

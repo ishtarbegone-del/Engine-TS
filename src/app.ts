@@ -38,8 +38,14 @@ await World.start();
 const tcpServer = new TcpServer();
 tcpServer.start();
 
-await startWeb();
-await startManagementWeb();
+if (Environment.VR_SINGLEPLAYER) {
+    const { startVrBridge } = await import('#/server/vr/VrBridge.js');
+    startVrBridge();
+    printInfo(`VR single-player ready on ${Environment.VR_BIND}:${Environment.VR_BRIDGE_PORT}`);
+} else {
+    await startWeb();
+    await startManagementWeb();
+}
 
 register.setDefaultLabels({ nodeId: Environment.NODE_ID });
 collectDefaultMetrics({ register });

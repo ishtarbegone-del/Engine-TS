@@ -8,6 +8,13 @@ export default {
     EASY_STARTUP: tryParseBoolean(process.env.EASY_STARTUP, false),
     WEBSITE_REGISTRATION: tryParseBoolean(process.env.WEBSITE_REGISTRATION, true),
 
+    /// single-player VR (Godot client + hidden localhost world)
+    VR_SINGLEPLAYER: tryParseBoolean(process.env.VR_SINGLEPLAYER, false),
+    VR_BRIDGE_PORT: tryParseInt(process.env.VR_BRIDGE_PORT, 43595),
+    VR_BIND: tryParseString(process.env.VR_BIND, '127.0.0.1'),
+    VR_USERNAME: tryParseString(process.env.VR_USERNAME, 'Player'),
+    VR_SNAPSHOT_RANGE: tryParseInt(process.env.VR_SNAPSHOT_RANGE, 24),
+
     /// web server
     WEB_PORT: tryParseInt(process.env.WEB_PORT, process.platform === 'win32' || process.platform === 'darwin' ? 80 : 8888),
     WEB_ALLOWED_ORIGIN: tryParseString(process.env.WEB_ALLOWED_ORIGIN, ''),
