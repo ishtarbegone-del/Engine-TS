@@ -293,6 +293,17 @@ type FaceGroup = {
     idx: number[];
 };
 
+export function modelTexIds(model: UnpackedModel): number[] {
+    const ids = new Set<number>();
+    for (let f = 0; f < model.faces; f++) {
+        const tex = faceTextureId(model, f);
+        if (tex >= 0) {
+            ids.add(tex);
+        }
+    }
+    return [...ids].sort((a, b) => a - b);
+}
+
 function faceTextureId(model: UnpackedModel, face: number): number {
     const info = model.renderType ? model.renderType[face] : 0;
     if ((info & 0x2) !== 0x2) {

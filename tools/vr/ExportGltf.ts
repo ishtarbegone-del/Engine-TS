@@ -8,7 +8,8 @@ import ObjType from '#/cache/config/ObjType.js';
 import Jagfile from '#/io/Jagfile.js';
 import Packet from '#/io/Packet.js';
 import { printError, printInfo } from '#/util/Logger.js';
-import { RsModelArchive, writeGlb } from '#tools/vr/RsModel.js';
+import { RsModelArchive, modelTexIds, writeGlb } from '#tools/vr/RsModel.js';
+import { writeModelTexJson } from '#tools/vr/WriteModelTex.js';
 
 const OUT = path.resolve(process.argv[2] ?? '../vr-client/assets/rs');
 const ONLY_SQUARE = process.argv[3] ?? '';
@@ -55,7 +56,9 @@ function exportCatalogs(): void {
             width: t.width,
             length: t.length,
             blockwalk: t.blockwalk,
-            hillskew: t.hillskew
+            hillskew: t.hillskew,
+            anim: t.anim ?? -1,
+            hasalpha: t.hasalpha ?? false
         });
     }
 
@@ -147,11 +150,16 @@ function exportModels(): number {
 
     const archive = new RsModelArchive(Jagfile.load(jagPath));
     let written = 0;
+    const texByModel: Record<string, number[]> = {};
     for (const id of archive.ids) {
         try {
             const model = archive.load(id);
             if (!model || model.points === 0 || model.faces === 0) {
                 continue;
+            }
+            const tex = modelTexIds(model);
+            if (tex.length > 0) {
+                texByModel[String(id)] = tex;
             }
             const glb = writeGlb(model);
             fs.writeFileSync(path.join(MODEL_DIR, `${id}.glb`), glb);
@@ -160,8 +168,15 @@ function exportModels(): number {
             printError(`model ${id}: ${err}`);
         }
     }
+    writeSidecar(texByModel);
     printInfo(`Wrote ${written} glTF models`);
     return written;
+}
+
+function writeSidecar(texByModel: Record<string, number[]>): void {
+    const dest = path.join(OUT, 'model-tex.json');
+    fs.writeFileSync(dest, JSON.stringify(texByModel));
+    printInfo(`Wrote model-tex.json models=${Object.keys(texByModel).length}`);
 }
 
 function exportMaps(): number {
@@ -282,6 +297,10 @@ if (!fs.existsSync(path.join(OUT, 'flo.json'))) {
 }
 if (!fs.existsSync(path.join(MODEL_DIR, '0.glb'))) {
     exportModels();
+}
+if (!fs.existsSync(path.join(OUT, 'model-tex.json'))) {
+    const n = writeModelTexJson(MODEL_DIR, path.join(OUT, 'model-tex.json'));
+    printInfo(`Wrote model-tex.json from glbs models=${n}`);
 }
 exportMaps();
 printInfo(`VR assets ready in ${OUT}${ONLY_SQUARE ? ` (square ${ONLY_SQUARE})` : ''}`);
