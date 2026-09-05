@@ -29,6 +29,7 @@ export type UnpackedModel = {
     c: Int32Array;
     colour: Int32Array;
     renderType: Int32Array | null;
+    alpha: Int32Array | null;
 };
 
 export function hslToRgb(hsl: number): [number, number, number] {
@@ -203,7 +204,8 @@ export class RsModelArchive {
             b: new Int32Array(meta.numFaces),
             c: new Int32Array(meta.numFaces),
             colour: new Int32Array(meta.numFaces),
-            renderType: null
+            renderType: null,
+            alpha: null
         };
 
         this.point1.pos = meta.vertexOrderOffset;
@@ -247,6 +249,13 @@ export class RsModelArchive {
                 model.renderType[f] = this.face2.g1();
             }
         }
+        if (meta.faceAlphaOffset >= 0 && this.face4) {
+            model.alpha = new Int32Array(meta.numFaces);
+            this.face4.pos = meta.faceAlphaOffset;
+            for (let f = 0; f < model.faces; f++) {
+                model.alpha[f] = this.face4.g1();
+            }
+        }
 
         this.vertex1.pos = meta.faceIndexOffset;
         this.vertex2.pos = meta.faceIndexOrderOffset;
@@ -287,11 +296,31 @@ export class RsModelArchive {
 
 type FaceGroup = {
     tex: number;
+    blend: boolean;
     pos: number[];
     col: number[];
     uv: number[];
     idx: number[];
 };
+
+export function modelHasFaceAlpha(model: UnpackedModel): boolean {
+    if (!model.alpha) {
+        return false;
+    }
+    for (let f = 0; f < model.alpha.length; f++) {
+        if (model.alpha[f] > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function faceGodotAlpha(model: UnpackedModel, face: number): number {
+    if (!model.alpha || face < 0 || face >= model.alpha.length) {
+        return 1;
+    }
+    return 1 - model.alpha[face] / 255;
+}
 
 export function modelTexIds(model: UnpackedModel): number[] {
     const ids = new Set<number>();
@@ -329,16 +358,22 @@ function planarUv(px: number, py: number, pz: number, nx: number, ny: number, nz
     return [px, py];
 }
 
+function isBlackRgb(r: number, g: number, b: number): boolean {
+    return Math.max(r, g, b) < 0.08;
+}
+
 export function writeGlb(model: UnpackedModel): Uint8Array {
-    const groups = new Map<number, FaceGroup>();
-    const ensure = (tex: number): FaceGroup => {
-        let group = groups.get(tex);
+    const groups = new Map<string, FaceGroup>();
+    const ensure = (tex: number, blend: boolean): FaceGroup => {
+        const key = `${tex}|${blend ? 1 : 0}`;
+        let group = groups.get(key);
         if (!group) {
-            group = { tex, pos: [], col: [], uv: [], idx: [] };
-            groups.set(tex, group);
+            group = { tex, blend, pos: [], col: [], uv: [], idx: [] };
+            groups.set(key, group);
         }
         return group;
     };
+    const woodTex = model.id === 2116 ? 0 : -1;
 
     for (let f = 0; f < model.faces; f++) {
         const ia = model.a[f];
@@ -364,17 +399,27 @@ export function writeGlb(model: UnpackedModel): Uint8Array {
         const nx = e1y * e2z - e1z * e2y;
         const ny = e1z * e2x - e1x * e2z;
         const nz = e1x * e2y - e1y * e2x;
-        const tex = faceTextureId(model, f);
-        const group = ensure(tex);
-        const [r, g, b] = tex < 0 ? hslToRgb(model.colour[f]) : [1, 1, 1];
+        let tex = faceTextureId(model, f);
+        const a = faceGodotAlpha(model, f);
+        const [cr, cg, cb] = hslToRgb(model.colour[f]);
+        if (model.id === 2116 && tex < 0) {
+            if (isBlackRgb(cr, cg, cb)) {
+                continue;
+            }
+            tex = woodTex;
+        }
+        const blend = a < 0.999;
+        const group = ensure(tex, blend);
+        const [r, g, b] = tex < 0 ? [cr, cg, cb] : [1, 1, 1];
         const base = group.pos.length / 3;
         for (const p of pts) {
             group.pos.push(p[0], p[1], p[2]);
             if (tex >= 0) {
                 const uv = planarUv(p[0], p[1], p[2], nx, ny, nz);
                 group.uv.push(uv[0], uv[1]);
-            } else {
-                group.col.push(r, g, b);
+            }
+            if (blend || tex < 0) {
+                group.col.push(r, g, b, a);
             }
         }
         group.idx.push(base, base + 1, base + 2);
@@ -440,11 +485,12 @@ export function writeGlb(model: UnpackedModel): Uint8Array {
             const uvView = addView(new Uint8Array(uv.buffer), 34962);
             attributes.TEXCOORD_0 = accessors.length;
             accessors.push({ bufferView: uvView, componentType: 5126, count: uv.length / 2, type: 'VEC2' });
-        } else {
+        }
+        if (group.col.length > 0) {
             const col = Float32Array.from(group.col);
             const colView = addView(new Uint8Array(col.buffer), 34962);
             attributes.COLOR_0 = accessors.length;
-            accessors.push({ bufferView: colView, componentType: 5126, count: col.length / 3, type: 'VEC3' });
+            accessors.push({ bufferView: colView, componentType: 5126, count: col.length / 4, type: 'VEC4' });
         }
         const idxView = addView(new Uint8Array(idx.buffer), 34963);
         const prim: Record<string, unknown> = {

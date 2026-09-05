@@ -8,11 +8,12 @@ import ObjType from '#/cache/config/ObjType.js';
 import Jagfile from '#/io/Jagfile.js';
 import Packet from '#/io/Packet.js';
 import { printError, printInfo } from '#/util/Logger.js';
-import { RsModelArchive, modelTexIds, writeGlb } from '#tools/vr/RsModel.js';
+import { RsModelArchive, modelHasFaceAlpha, modelTexIds, writeGlb } from '#tools/vr/RsModel.js';
 import { writeModelTexJson } from '#tools/vr/WriteModelTex.js';
 
-const OUT = path.resolve(process.argv[2] ?? '../vr-client/assets/rs');
-const ONLY_SQUARE = process.argv[3] ?? '';
+const OUT = path.resolve(process.argv[2] && !String(process.argv[2]).startsWith('--') ? process.argv[2] : '../vr-client/assets/rs');
+const ONLY_SQUARE = process.argv[3] && !String(process.argv[3]).startsWith('--') ? process.argv[3] : '';
+const ALPHA_ONLY = process.argv.includes('--alpha-models');
 const MODEL_DIR = path.join(OUT, 'models');
 const MAP_DIR = path.join(OUT, 'maps');
 const TEX_DIR = path.join(OUT, 'textures');
@@ -88,7 +89,9 @@ function exportCatalogs(): void {
             name: t.name,
             model: t.model,
             ops: t.op ? [...t.op] : [],
-            wearpos: t.wearpos
+            wearpos: t.wearpos,
+            recol1s: t.recol_s && t.recol_s.length > 0 ? t.recol_s[0] : -1,
+            recol1d: t.recol_d && t.recol_d.length > 0 ? t.recol_d[0] : -1
         });
     }
 
@@ -170,6 +173,52 @@ function exportModels(): number {
     }
     writeSidecar(texByModel);
     printInfo(`Wrote ${written} glTF models`);
+    return written;
+}
+
+function exportAlphaModels(): number {
+    const jagPath = 'data/pack/client/models';
+    if (!fs.existsSync(jagPath)) {
+        printError(`Missing ${jagPath} — skip alpha model rewrite`);
+        return 0;
+    }
+    const archive = new RsModelArchive(Jagfile.load(jagPath));
+    let written = 0;
+    const texByModel: Record<string, number[]> = {};
+    const existing = path.join(OUT, 'model-tex.json');
+    if (fs.existsSync(existing)) {
+        try {
+            const parsed = JSON.parse(fs.readFileSync(existing, 'utf8')) as Record<string, number[]>;
+            Object.assign(texByModel, parsed);
+        } catch {
+            // rewrite from this pass
+        }
+    }
+    for (const id of archive.ids) {
+        try {
+            const model = archive.load(id);
+            if (!model || model.points === 0 || model.faces === 0) {
+                continue;
+            }
+            if (!modelHasFaceAlpha(model) && id !== 2116 && id !== 2136 && id !== 2137) {
+                continue;
+            }
+            const tex = modelTexIds(model);
+            if (tex.length > 0) {
+                texByModel[String(id)] = tex;
+            } else if (id === 2116) {
+                texByModel['2116'] = [0];
+            }
+            fs.writeFileSync(path.join(MODEL_DIR, `${id}.glb`), writeGlb(model));
+            written++;
+        } catch (err) {
+            printError(`alpha model ${id}: ${err}`);
+        }
+    }
+    if (written > 0) {
+        writeSidecar(texByModel);
+    }
+    printInfo(`Rewrote ${written} alpha glTF models`);
     return written;
 }
 
@@ -295,12 +344,18 @@ if (!fs.existsSync(path.join(TEX_DIR, '0.png'))) {
 if (!fs.existsSync(path.join(OUT, 'flo.json'))) {
     exportCatalogs();
 }
-if (!fs.existsSync(path.join(MODEL_DIR, '0.glb'))) {
-    exportModels();
+if (ALPHA_ONLY) {
+    exportCatalogs();
+    exportAlphaModels();
+} else {
+    if (!fs.existsSync(path.join(MODEL_DIR, '0.glb'))) {
+        exportModels();
+    }
+    exportAlphaModels();
+    if (!fs.existsSync(path.join(OUT, 'model-tex.json'))) {
+        const n = writeModelTexJson(MODEL_DIR, path.join(OUT, 'model-tex.json'));
+        printInfo(`Wrote model-tex.json from glbs models=${n}`);
+    }
+    exportMaps();
 }
-if (!fs.existsSync(path.join(OUT, 'model-tex.json'))) {
-    const n = writeModelTexJson(MODEL_DIR, path.join(OUT, 'model-tex.json'));
-    printInfo(`Wrote model-tex.json from glbs models=${n}`);
-}
-exportMaps();
 printInfo(`VR assets ready in ${OUT}${ONLY_SQUARE ? ` (square ${ONLY_SQUARE})` : ''}`);

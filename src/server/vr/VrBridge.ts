@@ -13,6 +13,9 @@ import Player from '#/engine/entity/Player.js';
 import { PlayerLoading } from '#/engine/entity/PlayerLoading.js';
 import { NpcStat } from '#/engine/entity/NpcStat.js';
 import { PlayerStat } from '#/engine/entity/PlayerStat.js';
+import Component from '#/cache/config/Component.js';
+import ScriptProvider from '#/engine/script/ScriptProvider.js';
+import ScriptRunner from '#/engine/script/ScriptRunner.js';
 import ServerTriggerType from '#/engine/script/ServerTriggerType.js';
 import World from '#/engine/World.js';
 import Packet from '#/io/Packet.js';
@@ -27,6 +30,7 @@ type VrIntent =
     | { type: 'oploc'; x: number; z: number; loc: number; op?: number }
     | { type: 'opnpc'; slot: number; op?: number }
     | { type: 'opobj'; x: number; z: number; obj: number; op?: number }
+    | { type: 'invop'; slot: number; obj: number; op?: number }
     | { type: 'logout' };
 
 type InvSlot = { slot: number; id: number; count: number; name: string };
@@ -145,6 +149,7 @@ export function startVrBridge(): void {
         }
 
         keepAlive();
+        ensureBronzeAxe(player);
 
         const range = Environment.VR_SNAPSHOT_RANGE;
         const zoneR = Math.max(1, Math.ceil(range / 8));
@@ -201,7 +206,10 @@ export function startVrBridge(): void {
                         width: loc.width,
                         length: loc.length,
                         models: modelsOf(type?.models),
-                        ops: cleanOps(type?.op)
+                        ops: cleanOps(type?.op),
+                        anim: type?.anim ?? -1,
+                        seq: type?.anim ?? -1,
+                        changed: loc.isChanged()
                     });
                 }
 
@@ -253,10 +261,47 @@ export function startVrBridge(): void {
         };
     }
 
+    let bronzeAxeGranted = false;
+
+    function inventoryHas(target: Player, invId: number, objId: number): boolean {
+        if (invId < 0) {
+            return false;
+        }
+        const inv = target.getInventory(invId);
+        return !!inv && inv.getItemCount(objId) > 0;
+    }
+
+    function ensureBronzeAxe(target: Player): void {
+        let axeId = ObjType.getId('bronze_axe');
+        if (axeId < 0) {
+            axeId = 1351;
+        }
+        if (inventoryHas(target, InvType.INV, axeId) || inventoryHas(target, InvType.WORN, axeId)) {
+            bronzeAxeGranted = true;
+            return;
+        }
+        if (bronzeAxeGranted) {
+            return;
+        }
+        if (InvType.INV < 0) {
+            printInfo('[vr] bronze_axe skip: InvType.INV not loaded');
+            return;
+        }
+        const inv = target.getInventory(InvType.INV);
+        if (!inv) {
+            printInfo('[vr] bronze_axe skip: no inv');
+            return;
+        }
+        const added = target.invAdd(InvType.INV, axeId, 1, false);
+        bronzeAxeGranted = true;
+        printInfo(`[vr] bronze_axe add id=${axeId} added=${added}`);
+    }
+
     function login(): Player {
         const existing = World.getPlayerByUsername(Environment.VR_USERNAME);
         if (existing) {
             attachChat(existing);
+            ensureBronzeAxe(existing);
             return existing;
         }
 
@@ -267,6 +312,7 @@ export function startVrBridge(): void {
         }
         attachChat(created);
         World.newPlayers.add(created);
+        ensureBronzeAxe(created);
         return created;
     }
 
@@ -349,6 +395,42 @@ export function startVrBridge(): void {
             player.clearPendingAction();
             player.setInteraction(Interaction.ENGINE, obj, ServerTriggerType.APOBJ1 + (op - 1));
             player.pathToTarget();
+            return { type: 'ok', op };
+        }
+
+        if (intent.type === 'invop') {
+            if (player.delayed) {
+                return { type: 'ok', ignored: 'delayed' };
+            }
+            const slot = intent.slot | 0;
+            const objId = intent.obj | 0;
+            const inv = player.getInventory(InvType.INV);
+            if (!inv || !inv.validSlot(slot) || !inv.hasAt(slot, objId)) {
+                return { type: 'error', message: 'Inv slot mismatch' };
+            }
+            const obj = ObjType.get(objId);
+            // Wear/Wield is [opheld2,_] — not INV_BUTTON1 (that's wornitems:wear).
+            let op = intent.op ?? 1;
+            if (op !== 5 && obj.wearpos >= 0) {
+                const wearIdx = obj.iop.findIndex(s => s !== null && /^(wear|wield)$/i.test(s));
+                op = wearIdx >= 0 ? wearIdx + 1 : 2;
+            }
+            if (obj.iop[op - 1] === null) {
+                return { type: 'error', message: 'No item op' };
+            }
+            const com = Component.getByName('inventory:inv');
+            if (com && !player.isComponentVisible(com)) {
+                player.setTab(com.rootLayer, 3);
+            }
+            player.lastItem = objId;
+            player.lastSlot = slot;
+            player.clearPendingAction();
+            player.moveClickRequest = false;
+            const trigger = ServerTriggerType.OPHELD1 + (op - 1);
+            const script = ScriptProvider.getByTrigger(trigger, obj.id, obj.category);
+            if (script) {
+                player.executeScript(ScriptRunner.init(script, player), true);
+            }
             return { type: 'ok', op };
         }
 

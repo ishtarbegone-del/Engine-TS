@@ -10,6 +10,16 @@ function safeName(value: string): string {
     return value.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
 }
 
+function sessionParts(session: string): { day: string; stamp: string; house: boolean } {
+    const house = session.startsWith('house-');
+    const raw = house ? session.slice(6) : session;
+    const m = raw.match(/^(\d{4})(\d{2})(\d{2})-(\d{6})/);
+    if (!m) {
+        return { day: 'unknown', stamp: safeName(session), house };
+    }
+    return { day: `${m[1]}-${m[2]}-${m[3]}`, stamp: m[4], house };
+}
+
 function mapsquareKeys(wx: number, wz: number): string[] {
     const keys = new Set<string>();
     for (let z = wz - RADIUS; z <= wz + RADIUS; z++) {
@@ -71,6 +81,7 @@ function synthesizeGodotBuild(wx: number, wz: number, dump: string): string {
     lines.push('keep cook-east overlay 22');
     lines.push('do not flatten height');
     lines.push('loc-edits.json only after comparing this dump');
+    lines.push('if ANIMS has no loc seq do not invent a door swing');
     lines.push('');
     const locLines = locLinesFromDump(dump);
     lines.push('COUNTS');
@@ -102,6 +113,7 @@ const server = Bun.serve({
             return new Response('not found', { status: 404, headers: cors });
         }
         let body: {
+            kind?: string;
             session?: string;
             tick?: number;
             wx?: number;
@@ -109,6 +121,12 @@ const server = Bun.serve({
             dump?: string;
             build?: string;
             png?: string;
+            invVerts?: string;
+            invColors?: string;
+            modelCallbacks?: string;
+            equipAlign?: string;
+            groundObjs?: string;
+            groundVerts?: string;
         };
         try {
             body = await req.json();
@@ -119,12 +137,40 @@ const server = Bun.serve({
         const tick = Math.max(0, Math.min(9999, Number(body.tick) | 0));
         const wx = Number(body.wx) | 0;
         const wz = Number(body.wz) | 0;
-        const dir = path.join(OUT, `${session}-${wx}-${wz}`, `tick-${String(tick).padStart(4, '0')}`);
-        mkdirSync(dir, { recursive: true });
         const dump = String(body.dump ?? '');
+        const parts = sessionParts(session);
+        if (body.kind === 'house') {
+            const dir = path.join(OUT, parts.day, `house-${parts.stamp}-${wx}-${wz}`);
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(path.join(dir, 'house.txt'), dump, 'utf8');
+            console.log(`house dump ${dir}`);
+            return new Response('ok', { headers: cors });
+        }
+        if (body.kind === 'roof') {
+            const dir = path.join(OUT, parts.day, `roof-${parts.stamp}-${wx}-${wz}`);
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(path.join(dir, 'roof.txt'), dump, 'utf8');
+            console.log(`roof dump ${dir}`);
+            return new Response('ok', { headers: cors });
+        }
+        const dir = path.join(OUT, parts.day, `${parts.stamp}-${wx}-${wz}`, `tick-${String(tick).padStart(4, '0')}`);
+        mkdirSync(dir, { recursive: true });
         const build = String(body.build ?? '').trim() || synthesizeGodotBuild(wx, wz, dump);
         writeFileSync(path.join(dir, 'dump.txt'), dump, 'utf8');
         writeFileSync(path.join(dir, 'godot-build.txt'), build, 'utf8');
+        const extras: [string, string | undefined][] = [
+            ['inv-verts.txt', body.invVerts],
+            ['inv-colors.txt', body.invColors],
+            ['model-callbacks.txt', body.modelCallbacks],
+            ['equip-align.txt', body.equipAlign],
+            ['ground-objs.txt', body.groundObjs],
+            ['ground-verts.txt', body.groundVerts]
+        ];
+        for (const [name, text] of extras) {
+            if (text && text.length > 0) {
+                writeFileSync(path.join(dir, name), text, 'utf8');
+            }
+        }
         if (body.png) {
             writeFileSync(path.join(dir, 'view.png'), Buffer.from(body.png, 'base64'));
         }
