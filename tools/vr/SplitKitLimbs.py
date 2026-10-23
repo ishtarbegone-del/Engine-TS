@@ -189,9 +189,11 @@ def write_glb(path: Path, name: str, pos: list, col: list, idx: list) -> None:
 def main() -> None:
     arm_pos, arm_col, arm_idx = load_mesh(MODELS / "162.glb")
     hand_pos, hand_col, hand_idx = load_mesh(MODELS / "176.glb")
+    plate_pos, plate_col, plate_idx = load_mesh(MODELS / "164.glb")
     for keep_positive, suffix in ((False, "L"), (True, "R")):
         hp, hc, hi = split_side(hand_pos, hand_col, hand_idx, keep_positive)
         ap, ac, ai = split_side(arm_pos, arm_col, arm_idx, keep_positive)
+        pp, pc, pi = split_side(plate_pos, plate_col, plate_idx, keep_positive)
         if not hp:
             raise SystemExit(f"no hand triangles for {suffix}")
         origin = aabb_center(hp)
@@ -199,6 +201,10 @@ def main() -> None:
         ap = shift(ap, origin)
         write_glb(OUT / f"176_{suffix}.glb", f"kit_176_{suffix}", hp, hc, hi)
         write_glb(OUT / f"162_{suffix}.glb", f"kit_162_{suffix}", ap, ac, ai)
+        if not pp:
+            raise SystemExit(f"no plate-arm triangles for {suffix}")
+        pp = shift(pp, origin)
+        write_glb(OUT / f"164_{suffix}.glb", f"kit_164_{suffix}", pp, pc, pi)
 
 
 if __name__ == "__main__":

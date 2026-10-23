@@ -8,12 +8,25 @@ import ObjType from '#/cache/config/ObjType.js';
 import Jagfile from '#/io/Jagfile.js';
 import Packet from '#/io/Packet.js';
 import { printError, printInfo } from '#/util/Logger.js';
-import { RsModelArchive, modelHasFaceAlpha, modelTexIds, writeGlb } from '#tools/vr/RsModel.js';
+import { RsModelArchive, lastWriteGlbSrc, modelHasFaceAlpha, modelTexIds, writeGlb } from '#tools/vr/RsModel.js';
 import { writeModelTexJson } from '#tools/vr/WriteModelTex.js';
+import SeqType from '#/cache/config/SeqType.js';
+import SeqFrame from '#/cache/config/SeqFrame.js';
+import AnimBase from '#/cache/graphics/AnimBase.js';
+import AnimFrame from '#/cache/graphics/AnimFrame.js';
 
 const OUT = path.resolve(process.argv[2] && !String(process.argv[2]).startsWith('--') ? process.argv[2] : '../vr-client/assets/rs');
 const ONLY_SQUARE = process.argv[3] && !String(process.argv[3]).startsWith('--') ? process.argv[3] : '';
 const ALPHA_ONLY = process.argv.includes('--alpha-models');
+const MAPS_ONLY = process.argv.includes('--maps-only');
+const MODELS_ARG_IDX = process.argv.findIndex(a => String(a).startsWith('--models'));
+const MODELS_ARG = MODELS_ARG_IDX >= 0 ? process.argv[MODELS_ARG_IDX] : '';
+const MODELS_INLINE = MODELS_ARG ? String(MODELS_ARG).replace('--models', '').replace(/^=/, '') : '';
+const MODELS_LIST = MODELS_INLINE || (MODELS_ARG_IDX >= 0 ? String(process.argv[MODELS_ARG_IDX + 1] ?? '') : '');
+const MODEL_IDS: number[] = MODELS_LIST
+    .split(',')
+    .map(s => parseInt(s.trim(), 10))
+    .filter(n => Number.isFinite(n));
 const MODEL_DIR = path.join(OUT, 'models');
 const MAP_DIR = path.join(OUT, 'maps');
 const TEX_DIR = path.join(OUT, 'textures');
@@ -35,6 +48,10 @@ function packCoord(x: number, z: number, level: number): number {
 
 function ensureDir(dir: string): void {
     fs.mkdirSync(dir, { recursive: true });
+}
+
+function writeKeepImport(filePath: string): void {
+    fs.writeFileSync(`${filePath}.import`, '[remap]\nimporter="keep"\n');
 }
 
 function exportCatalogs(): void {
@@ -59,7 +76,13 @@ function exportCatalogs(): void {
             blockwalk: t.blockwalk,
             hillskew: t.hillskew,
             anim: t.anim ?? -1,
-            hasalpha: t.hasalpha ?? false
+            hasalpha: t.hasalpha ?? false,
+            offsetx: t.offsetx,
+            offsety: t.offsety,
+            offsetz: t.offsetz,
+            resizex: t.resizex,
+            resizey: t.resizey,
+            resizez: t.resizez
         });
     }
 
@@ -74,7 +97,16 @@ function exportCatalogs(): void {
             name: t.name,
             models: t.models ? Array.from(t.models) : [],
             ops: t.op ? [...t.op] : [],
-            size: t.size
+            size: t.size,
+            readyanim: t.readyanim ?? -1,
+            walkanim: t.walkanim ?? -1,
+            walkanim_b: t.walkanim_b ?? -1,
+            walkanim_r: t.walkanim_r ?? -1,
+            walkanim_l: t.walkanim_l ?? -1,
+            recols:
+                t.recol_s && t.recol_d
+                    ? Array.from(t.recol_s).map((s, i) => [s, t.recol_d[i] as number])
+                    : []
         });
     }
 
@@ -113,6 +145,10 @@ function exportCatalogs(): void {
 
     fs.writeFileSync(path.join(OUT, 'locs.json'), JSON.stringify(locs));
     fs.writeFileSync(path.join(OUT, 'npcs.json'), JSON.stringify(npcs));
+    const rat = NpcType.get(950);
+    if (rat) {
+        printInfo(`npc 950 ${rat.name} ready=${rat.readyanim} walk=${rat.walkanim} models=${rat.models ? Array.from(rat.models).join(',') : '-'}`);
+    }
     fs.writeFileSync(path.join(OUT, 'objs.json'), JSON.stringify(objs));
     fs.writeFileSync(path.join(OUT, 'flo.json'), JSON.stringify(flos));
     printInfo(`Wrote catalogs: ${locs.length} locs, ${npcs.length} npcs, ${objs.length} objs, ${flos.length} flos`);
@@ -142,6 +178,49 @@ function exportTextures(): number {
     }
     printInfo(`Copied ${copied} textures to ${TEX_DIR}`);
     return copied;
+}
+
+function exportModelIds(ids: number[]): number {
+    const jagPath = 'data/pack/client/models';
+    if (!fs.existsSync(jagPath)) {
+        printError(`Missing ${jagPath} — skip model meshes`);
+        return 0;
+    }
+    const archive = new RsModelArchive(Jagfile.load(jagPath));
+    let written = 0;
+    const texByModel: Record<string, number[]> = {};
+    const existingPath = path.join(OUT, 'model-tex.json');
+    if (fs.existsSync(existingPath)) {
+        try {
+            Object.assign(texByModel, JSON.parse(fs.readFileSync(existingPath, 'utf8')) as Record<string, number[]>);
+        } catch {
+            // rewrite from this pass
+        }
+    }
+    for (const id of ids) {
+        try {
+            const model = archive.load(id);
+            if (!model || model.points === 0 || model.faces === 0) {
+                printError(`model ${id}: empty`);
+                continue;
+            }
+            const tex = modelTexIds(model);
+            if (tex.length > 0) {
+                texByModel[String(id)] = tex;
+            }
+            const dest = path.join(MODEL_DIR, `${id}.glb`);
+            fs.writeFileSync(dest, writeGlb(model));
+            writeKeepImport(dest);
+            written++;
+        } catch (err) {
+            printError(`model ${id}: ${err}`);
+        }
+    }
+    if (written > 0) {
+        writeSidecar(texByModel);
+    }
+    printInfo(`Wrote ${written} requested glTF models`);
+    return written;
 }
 
 function exportModels(): number {
@@ -247,6 +326,7 @@ function exportMaps(): number {
         const mapsquareZ = mz << 6;
         const landPkt = Packet.load(path.join(src, file));
         const height: number[][][] = Array.from({ length: 4 }, () => Array.from({ length: 64 }, () => new Array(64).fill(0)));
+        const heightOp: number[][][] = Array.from({ length: 4 }, () => Array.from({ length: 64 }, () => new Array(64).fill(0)));
         const underlay: number[][][] = Array.from({ length: 4 }, () => Array.from({ length: 64 }, () => new Array(64).fill(0)));
         const overlay: number[][][] = Array.from({ length: 4 }, () => Array.from({ length: 64 }, () => new Array(64).fill(0)));
         const overlayShape: number[][][] = Array.from({ length: 4 }, () => Array.from({ length: 64 }, () => new Array(64).fill(0)));
@@ -263,6 +343,7 @@ function exportMaps(): number {
                             break;
                         }
                         if (opcode === 1) {
+                            heightOp[level][x][z] = 1;
                             height[level][x][z] = landPkt.g1();
                             break;
                         }
@@ -325,7 +406,7 @@ function exportMaps(): number {
             }
         }
 
-        const tile = { mx, mz, height, underlay, overlay, overlayShape, overlayRotation, linkBelow, locs };
+        const tile = { mx, mz, height, heightOp, underlay, overlay, overlayShape, overlayRotation, linkBelow, locs };
         fs.writeFileSync(path.join(MAP_DIR, `${mx}_${mz}.json`), JSON.stringify(tile));
         count++;
     }
@@ -334,16 +415,142 @@ function exportMaps(): number {
     return count;
 }
 
+function exportAnimCatalogs(): void {
+    SeqFrame.load('data/pack');
+    SeqType.load('data/pack');
+    const seqs: Record<string, object> = {};
+    for (let id = 0; id < SeqType.count; id++) {
+        const t = SeqType.get(id);
+        if (!t) {
+            continue;
+        }
+        seqs[String(id)] = {
+            frames: t.frames ? Array.from(t.frames) : [],
+            iframes: t.iframes ? Array.from(t.iframes) : [],
+            delay: t.delay ? Array.from(t.delay) : [],
+            walkmerge: t.walkmerge ? Array.from(t.walkmerge) : null,
+            loops: t.loops,
+            duration: t.duration
+        };
+    }
+    fs.writeFileSync(path.join(OUT, 'seqs.json'), JSON.stringify(seqs));
+    writeKeepImport(path.join(OUT, 'seqs.json'));
+    printInfo(`Wrote seqs.json n=${Object.keys(seqs).length}`);
+    const giantReady = seqs['140'] as { frames?: number[] } | undefined;
+    const giantWalk = seqs['137'] as { frames?: number[] } | undefined;
+    printInfo(`seq 140 frames=${giantReady?.frames?.length ?? 0} seq 137 frames=${giantWalk?.frames?.length ?? 0}`);
+
+    const jagPath = 'data/pack/client/models';
+    if (!fs.existsSync(jagPath)) {
+        printError(`Missing ${jagPath} — skip anim bases/frames`);
+        return;
+    }
+    const jag = Jagfile.load(jagPath);
+    AnimBase.unpack225(jag);
+    AnimFrame.unpack225(jag);
+
+    const usedFrames = new Set<number>();
+    const usedBases = new Set<number>();
+    for (const seq of Object.values(seqs) as { frames?: number[] }[]) {
+        for (const fid of seq.frames ?? []) {
+            if (fid >= 0) {
+                usedFrames.add(fid);
+            }
+        }
+    }
+
+    const frames: Record<string, object> = {};
+    for (const id of usedFrames) {
+        const frame = AnimFrame.instances[id];
+        if (!frame) {
+            continue;
+        }
+        usedBases.add(frame.base);
+        frames[String(id)] = {
+            base: frame.base,
+            delay: frame.delay,
+            ti: Array.from(frame.groups),
+            tx: Array.from(frame.x),
+            ty: Array.from(frame.y),
+            tz: Array.from(frame.z)
+        };
+    }
+
+    const bases: Record<string, object> = {};
+    for (const id of usedBases) {
+        const base = AnimBase.instances[id];
+        if (!base) {
+            continue;
+        }
+        bases[String(id)] = {
+            types: Array.from(base.types),
+            labels: base.labels.map(row => Array.from(row))
+        };
+    }
+    fs.writeFileSync(path.join(OUT, 'anim-bases.json'), JSON.stringify(bases));
+    writeKeepImport(path.join(OUT, 'anim-bases.json'));
+    printInfo(`Wrote anim-bases.json n=${Object.keys(bases).length}`);
+    fs.writeFileSync(path.join(OUT, 'anim-frames.json'), JSON.stringify(frames));
+    writeKeepImport(path.join(OUT, 'anim-frames.json'));
+    printInfo(`Wrote anim-frames.json n=${Object.keys(frames).length}`);
+
+    const archive = new RsModelArchive(jag);
+    const npcModels = new Set<number>();
+    for (let id = 0; id < NpcType.count; id++) {
+        const t = NpcType.get(id);
+        if (!t?.models) {
+            continue;
+        }
+        for (const mid of t.models) {
+            npcModels.add(mid);
+        }
+    }
+    let labels = 0;
+    for (const id of npcModels) {
+        const model = archive.load(id);
+        if (!model || !model.vertexLabel) {
+            continue;
+        }
+        try {
+            writeGlb(model);
+        } catch {
+            continue;
+        }
+        const payload = {
+            id,
+            points: model.points,
+            x: Array.from(model.x),
+            y: Array.from(model.y),
+            z: Array.from(model.z),
+            labels: Array.from(model.vertexLabel),
+            glb_src: lastWriteGlbSrc
+        };
+        fs.writeFileSync(path.join(MODEL_DIR, `${id}.labels.json`), JSON.stringify(payload));
+        writeKeepImport(path.join(MODEL_DIR, `${id}.labels.json`));
+        labels++;
+    }
+    printInfo(`Wrote ${labels} model label sidecars`);
+}
+
 ensureDir(OUT);
 ensureDir(MODEL_DIR);
+if (MODEL_IDS.length > 0) {
+    exportModelIds(MODEL_IDS);
+    printInfo(`VR assets ready in ${OUT} (models ${MODEL_IDS.join(',')})`);
+    process.exit(0);
+}
 ensureDir(MAP_DIR);
+if (MAPS_ONLY) {
+    exportMaps();
+    printInfo(`VR assets ready in ${OUT}${ONLY_SQUARE ? ` (square ${ONLY_SQUARE})` : ''} (maps only)`);
+    process.exit(0);
+}
 ensureDir(TEX_DIR);
 if (!fs.existsSync(path.join(TEX_DIR, '0.png'))) {
     exportTextures();
 }
-if (!fs.existsSync(path.join(OUT, 'flo.json'))) {
-    exportCatalogs();
-}
+exportCatalogs();
+exportAnimCatalogs();
 if (ALPHA_ONLY) {
     exportCatalogs();
     exportAlphaModels();

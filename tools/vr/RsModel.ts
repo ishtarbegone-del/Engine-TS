@@ -30,6 +30,7 @@ export type UnpackedModel = {
     colour: Int32Array;
     renderType: Int32Array | null;
     alpha: Int32Array | null;
+    vertexLabel: Int32Array | null;
 };
 
 export function hslToRgb(hsl: number): [number, number, number] {
@@ -205,7 +206,8 @@ export class RsModelArchive {
             c: new Int32Array(meta.numFaces),
             colour: new Int32Array(meta.numFaces),
             renderType: null,
-            alpha: null
+            alpha: null,
+            vertexLabel: null
         };
 
         this.point1.pos = meta.vertexOrderOffset;
@@ -290,6 +292,14 @@ export class RsModelArchive {
             model.c[f] = c;
         }
 
+        if (meta.vertexLabelOffset >= 0 && this.point5) {
+            model.vertexLabel = new Int32Array(meta.numPoints);
+            this.point5.pos = meta.vertexLabelOffset;
+            for (let v = 0; v < model.points; v++) {
+                model.vertexLabel[v] = this.point5.g1();
+            }
+        }
+
         return model;
     }
 }
@@ -301,6 +311,7 @@ type FaceGroup = {
     col: number[];
     uv: number[];
     idx: number[];
+    src: number[];
 };
 
 export function modelHasFaceAlpha(model: UnpackedModel): boolean {
@@ -362,13 +373,15 @@ function isBlackRgb(r: number, g: number, b: number): boolean {
     return Math.max(r, g, b) < 0.08;
 }
 
+export let lastWriteGlbSrc: number[] = [];
+
 export function writeGlb(model: UnpackedModel): Uint8Array {
     const groups = new Map<string, FaceGroup>();
     const ensure = (tex: number, blend: boolean): FaceGroup => {
         const key = `${tex}|${blend ? 1 : 0}`;
         let group = groups.get(key);
         if (!group) {
-            group = { tex, blend, pos: [], col: [], uv: [], idx: [] };
+            group = { tex, blend, pos: [], col: [], uv: [], idx: [], src: [] };
             groups.set(key, group);
         }
         return group;
@@ -422,6 +435,7 @@ export function writeGlb(model: UnpackedModel): Uint8Array {
                 group.col.push(r, g, b, a);
             }
         }
+        group.src.push(ia, ib, ic);
         group.idx.push(base, base + 1, base + 2);
     }
 
@@ -435,6 +449,7 @@ export function writeGlb(model: UnpackedModel): Uint8Array {
     const accessors: object[] = [];
     const bufferViews: object[] = [];
     let binSize = 0;
+    lastWriteGlbSrc = [];
 
     const addView = (bytes: Uint8Array, target: number): number => {
         const off = binSize;
@@ -466,6 +481,7 @@ export function writeGlb(model: UnpackedModel): Uint8Array {
         if (group.idx.length === 0) {
             continue;
         }
+        lastWriteGlbSrc.push(...group.src);
         const pos = Float32Array.from(group.pos);
         const idx = Uint32Array.from(group.idx);
         const { min, max } = bounds(pos);

@@ -438,6 +438,13 @@ export default class ClientCheatHandler extends ClientGameMessageHandler<ClientC
                         player.setLevel(i, 1);
                     }
                 }
+            } else if (cmd === 'maxme') {
+                for (let i = 0; i < PlayerStatEnabled.length; i++) {
+                    if (PlayerStatEnabled[i]) {
+                        player.setLevel(i, 99);
+                    }
+                }
+                player.messageGame("You're maxed.");
             } else if (cmd === 'locadd') {
                 // authentic - https://youtu.be/E6tQ3b3vzro?t=3194
                 if (args.length < 1) {

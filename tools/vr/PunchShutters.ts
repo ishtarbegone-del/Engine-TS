@@ -519,13 +519,10 @@ function sameAxis(shutterAngle: number, wallAngle: number): boolean {
     return shutterAngle % 2 === wallAngle % 2;
 }
 
-function worldHole(opening: Vec3[], shutter: Loc, opposite?: Loc): Box | null {
+function worldHole(opening: Vec3[], shutter: Loc): Box | null {
     const worldBox = emptyBox();
     for (const v of opening) {
         expand(worldBox, toWorld(v, shutter, true));
-        if (opposite) {
-            expand(worldBox, toWorld(v, opposite, true));
-        }
     }
     if (!Number.isFinite(worldBox.min.x)) {
         return null;
@@ -553,18 +550,42 @@ function primsLocalAabb(prims: Prim[]): Box {
 }
 
 function slabWorld(wall: Loc, local: Box): Box {
+    return slabWorldYaw(wall, local, yawOf(wall.angle));
+}
+
+function slabWorldYaw(wall: Loc, local: Box, yaw: number): Box {
     const world = emptyBox();
     for (const c of boxCorners(local)) {
-        expand(world, toWorld(c, wall, false));
+        expand(world, add(locOrigin(wall, false), applyYaw(c, yaw)));
     }
     return world;
+}
+
+function mirrorPrimZ(prim: Prim): Prim {
+    return {
+        pos: prim.pos.map((p) => ({ x: p.x, y: p.y, z: -p.z })),
+        idx: [...prim.idx],
+        col: [...prim.col],
+        uv: [...prim.uv],
+        tex: prim.tex
+    };
+}
+
+function rotatePrimY(prim: Prim, yaw: number): Prim {
+    return {
+        pos: prim.pos.map((p) => applyYaw(p, yaw)),
+        idx: [...prim.idx],
+        col: [...prim.col],
+        uv: [...prim.uv],
+        tex: prim.tex
+    };
 }
 
 function locLabel(loc: Loc): string {
     return `${loc.x},${loc.z}`;
 }
 
-function findOpposite(shutters: Loc[], shutter: Loc): Loc | undefined {
+function _findOpposite(shutters: Loc[], shutter: Loc): Loc | undefined {
     const into = intoWall(shutter.angle);
     const oppAngle = (shutter.angle + 2) % 4;
     const same = shutters.find(
@@ -585,30 +606,46 @@ function findOpposite(shutters: Loc[], shutter: Loc): Loc | undefined {
 
 function findSkip(walls: Loc[], shutter: Loc): Loc[] {
     return walls.filter(
-        (w) => w.x === shutter.x && w.z === shutter.z && w.level === shutter.level && !sameAxis(shutter.angle, w.angle)
+        (w) =>
+            w.x === shutter.x &&
+            w.z === shutter.z &&
+            w.level === shutter.level &&
+            w.shape !== 2 &&
+            !sameAxis(shutter.angle, w.angle)
     );
 }
 
-function leafTiles(shutter: Loc, opposite?: Loc): Set<string> {
+function leafTiles(shutter: Loc): Set<string> {
     const tiles = new Set<string>([`${shutter.x},${shutter.z}`]);
     const into = intoWall(shutter.angle);
     tiles.add(`${shutter.x + Math.round(into.x)},${shutter.z + Math.round(into.z)}`);
-    if (opposite) {
-        tiles.add(`${opposite.x},${opposite.z}`);
-        const oInto = intoWall(opposite.angle);
-        tiles.add(`${opposite.x + Math.round(oInto.x)},${opposite.z + Math.round(oInto.z)}`);
-    }
     return tiles;
 }
 
-function findLeaves(walls: Loc[], shutter: Loc, hole: Box, opposite: Loc | undefined, slabOf: (wall: Loc) => Box): Loc[] {
-    const tiles = leafTiles(shutter, opposite);
+function axisOk(window: Loc, wall: Loc): boolean {
+    if (wall.shape === 2) {
+        return true;
+    }
+    return sameAxis(window.angle, wall.angle);
+}
+
+function wallHitsHole(wall: Loc, hole: Box, localAabb: Box): boolean {
+    if (wall.shape === 2) {
+        const y0 = yawOf(wall.angle);
+        const y1 = yawOf((wall.angle + 1) % 4);
+        return boxesOverlap(hole, slabWorldYaw(wall, localAabb, y0)) || boxesOverlap(hole, slabWorldYaw(wall, localAabb, y1));
+    }
+    return boxesOverlap(hole, slabWorld(wall, localAabb));
+}
+
+function findLeaves(walls: Loc[], shutter: Loc, hole: Box, localAabbOf: (wall: Loc) => Box): Loc[] {
+    const tiles = leafTiles(shutter);
     return walls.filter(
         (w) =>
             w.level === shutter.level &&
             tiles.has(`${w.x},${w.z}`) &&
-            sameAxis(shutter.angle, w.angle) &&
-            boxesOverlap(hole, slabOf(w))
+            axisOk(shutter, w) &&
+            wallHitsHole(w, hole, localAabbOf(w))
     );
 }
 
@@ -652,12 +689,12 @@ function main(): void {
         }));
     };
     const slabLocal = new Map<number, Box>();
-    const slabOf = (wall: Loc): Box => {
+    const localAabbOf = (wall: Loc): Box => {
         const modelId = WALL_MODELS[wall.shape] ?? 634;
         if (!slabLocal.has(modelId)) {
             slabLocal.set(modelId, primsLocalAabb(loadWall(modelId)));
         }
-        return slabWorld(wall, slabLocal.get(modelId)!);
+        return slabLocal.get(modelId)!;
     };
     const holes = new Map<string, { wall: Loc; boxes: Box[] }>();
     let shutters = 0;
@@ -670,12 +707,11 @@ function main(): void {
         const walls = map.locs.filter((l) => l.type === WALL);
         const shuttersOn = map.locs.filter((l) => l.type === SHUTTER);
         for (const shutter of shuttersOn) {
-            const opposite = findOpposite(shuttersOn, shutter);
-            const hole = worldHole(opening, shutter, opposite);
+            const hole = worldHole(opening, shutter);
             if (!hole) {
                 continue;
             }
-            const leaves = findLeaves(walls, shutter, hole, opposite, slabOf);
+            const leaves = findLeaves(walls, shutter, hole, localAabbOf);
             const skip = findSkip(walls, shutter);
             printInfo(
                 `shutter ${locLabel(shutter)} a${shutter.angle} leaves=${leaves.length ? leaves.map(locLabel).join('|') : '-'} skip=${skip.length ? skip.map(locLabel).join('|') : '-'}`
@@ -698,7 +734,14 @@ function main(): void {
     for (const [key, row] of holes) {
         const modelId = WALL_MODELS[row.wall.shape] ?? 634;
         try {
-            const prims = loadWall(modelId).map((p) => punchPrim(p, row.boxes));
+            let prims: Prim[];
+            if (row.wall.shape === 2) {
+                const arm0 = loadWall(modelId).map((p) => punchPrim(mirrorPrimZ(p), row.boxes));
+                const arm1 = loadWall(modelId).map((p) => punchPrim(rotatePrimY(p, Math.PI * 0.5), row.boxes));
+                prims = [...arm0, ...arm1];
+            } else {
+                prims = loadWall(modelId).map((p) => punchPrim(p, row.boxes));
+            }
             const dest = path.join(punchedDir, `1902_${key}.glb`);
             fs.writeFileSync(dest, writeGlb(prims, `1902_${key}`));
             keep.add(`1902_${key}.glb`);

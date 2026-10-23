@@ -8,6 +8,7 @@ import { CoordGrid } from '#/engine/CoordGrid.js';
 import { Interaction } from '#/engine/entity/Interaction.js';
 import Loc from '#/engine/entity/Loc.js';
 import Npc from '#/engine/entity/Npc.js';
+import { EntityLifeCycle } from '#/engine/entity/EntityLifeCycle.js';
 import Obj from '#/engine/entity/Obj.js';
 import Player from '#/engine/entity/Player.js';
 import { PlayerLoading } from '#/engine/entity/PlayerLoading.js';
@@ -228,6 +229,7 @@ export function startVrBridge(): void {
                         level: obj.level,
                         count: obj.count,
                         model: type?.model ?? -1,
+                        stackH: 0,
                         ops: cleanOps(type?.op)
                     });
                 }
@@ -402,21 +404,31 @@ export function startVrBridge(): void {
             if (player.delayed) {
                 return { type: 'ok', ignored: 'delayed' };
             }
-            const slot = intent.slot | 0;
+            let slot = intent.slot | 0;
             const objId = intent.obj | 0;
             const inv = player.getInventory(InvType.INV);
-            if (!inv || !inv.validSlot(slot) || !inv.hasAt(slot, objId)) {
-                return { type: 'error', message: 'Inv slot mismatch' };
+            if (!inv) {
+                return { type: 'error', message: 'Inv slot mismatch', slot, obj: objId };
+            }
+            if (!inv.validSlot(slot) || !inv.hasAt(slot, objId)) {
+                slot = inv.getItemIndex(objId);
+            }
+            if (slot < 0) {
+                return { type: 'error', message: 'Inv slot mismatch', slot, obj: objId };
             }
             const obj = ObjType.get(objId);
+            if (!obj) {
+                return { type: 'error', message: 'Inv slot mismatch', slot, obj: objId };
+            }
             // Wear/Wield is [opheld2,_] — not INV_BUTTON1 (that's wornitems:wear).
             let op = intent.op ?? 1;
             if (op !== 5 && obj.wearpos >= 0) {
                 const wearIdx = obj.iop.findIndex(s => s !== null && /^(wear|wield)$/i.test(s));
                 op = wearIdx >= 0 ? wearIdx + 1 : 2;
             }
-            if (obj.iop[op - 1] === null) {
-                return { type: 'error', message: 'No item op' };
+            // Packed iop[4] is often null; 2004 still shows default Drop.
+            if (op !== 5 && obj.iop[op - 1] === null) {
+                return { type: 'error', message: 'No item op', slot, obj: objId, op };
             }
             const com = Component.getByName('inventory:inv');
             if (com && !player.isComponentVisible(com)) {
@@ -430,8 +442,20 @@ export function startVrBridge(): void {
             const script = ScriptProvider.getByTrigger(trigger, obj.id, obj.category);
             if (script) {
                 player.executeScript(ScriptRunner.init(script, player), true);
+                return { type: 'ok', op, slot };
             }
-            return { type: 'ok', op };
+            if (op === 5) {
+                const item = inv.get(slot);
+                const count = item?.count ?? 0;
+                const dropped = player.invDel(InvType.INV, objId, count, slot);
+                if (dropped === 0) {
+                    return { type: 'error', message: 'Inv slot mismatch', slot, obj: objId };
+                }
+                const floorObj = new Obj(player.level, player.x, player.z, EntityLifeCycle.DESPAWN, objId, dropped);
+                World.addObj(floorObj, player.hash64, 200);
+                return { type: 'ok', op, slot, dropped };
+            }
+            return { type: 'ok', op, slot };
         }
 
         return { type: 'error', message: 'Unknown intent' };

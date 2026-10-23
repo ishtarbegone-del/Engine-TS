@@ -1,23 +1,24 @@
-import { mkdirSync, writeFileSync } from 'fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'fs';
 import path from 'path';
 
 const PORT = 43596;
 const HOST = '127.0.0.1';
 const OUT = path.resolve(import.meta.dir, '../../../vr-client/debug-dumps/rs2004');
-const RADIUS = 12;
+const RADIUS = 48;
 
 function safeName(value: string): string {
     return value.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
 }
 
-function sessionParts(session: string): { day: string; stamp: string; house: boolean } {
+function sessionParts(session: string): { day: string; stamp: string; house: boolean; anim: boolean } {
     const house = session.startsWith('house-');
-    const raw = house ? session.slice(6) : session;
+    const anim = session.startsWith('anim-');
+    const raw = house ? session.slice(6) : anim ? session.slice(5) : session;
     const m = raw.match(/^(\d{4})(\d{2})(\d{2})-(\d{6})/);
     if (!m) {
-        return { day: 'unknown', stamp: safeName(session), house };
+        return { day: 'unknown', stamp: safeName(session), house, anim };
     }
-    return { day: `${m[1]}-${m[2]}-${m[3]}`, stamp: m[4], house };
+    return { day: `${m[1]}-${m[2]}-${m[3]}`, stamp: m[4], house, anim };
 }
 
 function mapsquareKeys(wx: number, wz: number): string[] {
@@ -151,6 +152,13 @@ const server = Bun.serve({
             mkdirSync(dir, { recursive: true });
             writeFileSync(path.join(dir, 'roof.txt'), dump, 'utf8');
             console.log(`roof dump ${dir}`);
+            return new Response('ok', { headers: cors });
+        }
+        if (body.kind === 'anim') {
+            const dir = path.join(OUT, parts.day, `anim-${parts.stamp}-${wx}-${wz}`);
+            mkdirSync(dir, { recursive: true });
+            appendFileSync(path.join(dir, 'anims.txt'), dump.endsWith('\n') ? dump : dump + '\n', 'utf8');
+            console.log(`anim log tick=${tick} ${dir}`);
             return new Response('ok', { headers: cors });
         }
         const dir = path.join(OUT, parts.day, `${parts.stamp}-${wx}-${wz}`, `tick-${String(tick).padStart(4, '0')}`);

@@ -1865,7 +1865,7 @@ class InputTracking {
 }
 
 // src/client/KeyCodes.ts
-var CanvasEnabledKeys = ["F9", "F10", "F11", "F12"];
+var CanvasEnabledKeys = ["F7", "F9", "F10", "F11", "F12"];
 var KeyCodes = new Map;
 KeyCodes.set("ArrowLeft", { code: 37, ch: 1 });
 KeyCodes.set("ArrowRight", { code: 39, ch: 2 });
@@ -5061,6 +5061,12 @@ class GameShell {
   stealF9() {
     return false;
   }
+  stealF7() {
+    return false;
+  }
+  stealShiftS() {
+    return false;
+  }
   constructor(resizetoFit = false) {
     canvas.tabIndex = -1;
     canvas2d.fillStyle = "black";
@@ -5104,6 +5110,14 @@ class GameShell {
         e.stopPropagation();
       }
       if (e.key === "F9" && this.stealF9()) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      if (e.key === "F7" && this.stealF7()) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      if (e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && e.code === "KeyS" && this.stealShiftS()) {
         e.preventDefault();
         e.stopPropagation();
       }
@@ -14053,6 +14067,75 @@ function addCollisionEdges(edges, cmap, baseX, baseZ) {
     }
   }
 }
+function isWalkableFlags(flags) {
+  return (flags & 2621696 /* SQ_BLOCKED */) === 0;
+}
+function decodeBlockDirs(flags) {
+  let out = "";
+  if ((flags & 2 /* W_N */) !== 0) {
+    out += "N";
+  }
+  if ((flags & 8 /* W_E */) !== 0) {
+    out += "E";
+  }
+  if ((flags & 32 /* W_S */) !== 0) {
+    out += "S";
+  }
+  if ((flags & 128 /* W_W */) !== 0) {
+    out += "W";
+  }
+  return out.length > 0 ? out : "none";
+}
+function edgeTouchesFlood(key, floodKeys) {
+  const parts = key.split(">");
+  if (parts.length !== 2) {
+    return false;
+  }
+  return parts.some((part) => floodKeys.has(part));
+}
+function appendWalkClipSections(lines, args) {
+  const { baseX, baseZ, tiles, collision } = args;
+  const floodKeys = new Set(tiles.map((t) => `${t.x},${t.z}`));
+  const walkCounts = [];
+  lines.push("WALK");
+  lines.push("CollisionMap walkable floors over FLOOR flood tiles for levels 0-3; walk=yes when (flags & SQ_BLOCKED)==0");
+  for (let lvl = 0;lvl < 4 /* LEVELS */; lvl++) {
+    const cmap = collision[lvl] ?? null;
+    let walkable = 0;
+    for (const t of tiles) {
+      const lx = t.x - baseX;
+      const lz = t.z - baseZ;
+      if (lx < 0 || lz < 0 || lx >= 104 /* SIZE */ || lz >= 104 /* SIZE */) {
+        continue;
+      }
+      const flags = cmap ? cmap.flags[CollisionMap.index(lx, lz)] : 16777216 /* UNLOADED */;
+      const walk = isWalkableFlags(flags);
+      if (walk) {
+        walkable++;
+      }
+      lines.push(`tile ${t.x},${t.z} level=${lvl} flags=${flags} walk=${walk ? "yes" : "no"} block=${decodeBlockDirs(flags)} sq=${walk ? "open" : "blocked"}`);
+    }
+    walkCounts.push(walkable);
+  }
+  lines.push("");
+  lines.push("CLIP");
+  lines.push("CollisionMap W_N/E/S/W edges touching FLOOR flood; compare to VR EDGES LIVE / story edges");
+  let clipAny = false;
+  for (let lvl = 0;lvl < 4 /* LEVELS */; lvl++) {
+    const edges = new Set;
+    addCollisionEdges(edges, collision[lvl] ?? null, baseX, baseZ);
+    const filtered = [...edges].filter((key) => edgeTouchesFlood(key, floodKeys));
+    filtered.sort();
+    for (const key of filtered) {
+      clipAny = true;
+      lines.push(`edge ${key} level=${lvl}`);
+    }
+  }
+  if (!clipAny) {
+    lines.push("(none)");
+  }
+  return walkCounts;
+}
 function locTypeOf(type) {
   try {
     return LocType.list(type);
@@ -14335,6 +14418,13 @@ function buildHouseText(args) {
     lines.push(`tile ${t.x},${t.z} lx=${lx},${lz} ov=${ov} packed=${packed} rot=${rot} und=${und} flags=${flags} h=(${h[0]},${h[1]},${h[2]},${h[3]}) y=${avgHeightM(h).toFixed(3)}`);
   }
   lines.push("");
+  appendWalkClipSections(lines, {
+    baseX,
+    baseZ,
+    tiles: fill.tiles,
+    collision: args.collision
+  });
+  lines.push("");
   lines.push("LOCS");
   const locs = args.world ? collectHouseLocs(args.world, baseX, baseZ, fill.tiles, level, false) : [];
   if (locs.length === 0) {
@@ -14363,10 +14453,10 @@ function buildHouseText(args) {
       lines.push("2004 gap — do not invent");
       return;
     }
-    lines.push("VR every flood tile must have 1933 shape 17 at L1 Y; edge may also keep 12/14; pad 13 remap to 12; hide 16 off-floor; hide 1793");
+    lines.push("VR show L1 roofs at dump Y; hide L3 while L1 walls are hidden; do not flatten");
     for (const loc of roofs) {
       const onFloor = floodKeys.has(`${loc.x},${loc.z}`);
-      const hide = loc.shape === 16 && !onFloor ? " hide=gable" : " spawn=L1Y";
+      const hide = loc.level >= 3 ? " hide=L3" : loc.shape === 16 && !onFloor ? " hide=gable" : " spawn=dumpY";
       lines.push(`${locLine(loc, roofY(loc))} material=2004-loc-${loc.type} placement=tile ${loc.x},${loc.z} level=${loc.level}${hide}`);
     }
   };
@@ -14403,7 +14493,7 @@ function buildHouseText(args) {
   }
   lines.push("");
   lines.push("GAPS");
-  lines.push("flood tiles with no 1933 shape 17; VR spawn 1933 shape 17 at L1 Y");
+  lines.push("flood tiles with no 1933 shape 17 — 2004 gap, do not invent; do not flatten");
   if (gapTiles.length === 0) {
     lines.push("(none)");
   } else {
@@ -14448,6 +14538,7 @@ function buildHouseText(args) {
   lines.push("");
   lines.push("VR");
   lines.push("compare this folder to a VR F12 dump");
+  lines.push("compare CLIP to VR EDGES LIVE / story edges");
   lines.push("keep cook-east overlay 22");
   lines.push("walk uses _edges (shape 0/9/4-8 one side, 1/3 none, 2 both) plus occupy 9/10/11/walldecor");
   lines.push("do not invent locs");
@@ -14920,7 +15011,7 @@ function buildEquipAlign(player) {
 }
 
 // src/client/RefGroundDump.ts
-var RADIUS = 12;
+var RADIUS = ROOF_SCAN;
 function listObjs(list) {
   const out = [];
   for (let obj = list.head();obj !== null; obj = list.next()) {
@@ -15096,7 +15187,7 @@ function buildGroundVerts(ctx) {
 
 // src/client/RefCapture.ts
 var INGEST = "http://127.0.0.1:43596/capture";
-var RADIUS2 = 12;
+var RADIUS2 = ROOF_SCAN;
 var MAX_TICKS = 25;
 var INTERVAL_MS = 600;
 
@@ -15128,7 +15219,12 @@ class RefCapture {
     if (!fill.inside) {
       chat("not inside a house");
     } else {
-      chat(`inside house tiles=${fill.tiles.length} floor=${level}`);
+      const walkCounts = [];
+      for (let lvl = 0;lvl < 4; lvl++) {
+        const re = new RegExp(`tile \\d+,\\d+ level=${lvl} flags=\\d+ walk=yes`, "g");
+        walkCounts.push((dump.match(re) ?? []).length);
+      }
+      chat(`inside house tiles=${fill.tiles.length} floor=${level} walkable L0=${walkCounts[0]} L1=${walkCounts[1]} L2=${walkCounts[2]} L3=${walkCounts[3]}`);
     }
     const now = new Date;
     const pad = (n) => String(n).padStart(2, "0");
@@ -15268,11 +15364,13 @@ class RefCapture {
       if (!res.ok && !this.warned) {
         this.warned = true;
         console.warn("ref capture ingest rejected", res.status);
+        this.notify?.(`ingest rejected ${res.status} — start LostCityRef.bat`);
       }
     } catch {
       if (!this.warned) {
         this.warned = true;
         console.warn("ref capture ingest down — start LostCityRef.bat");
+        this.notify?.("ingest down — start LostCityRef.bat");
       }
     } finally {
       this.busy = false;
@@ -15318,9 +15416,16 @@ class RefCapture {
     lines.push("TILES");
     for (let z = ctx.wz - RADIUS2;z <= ctx.wz + RADIUS2; z++) {
       for (let x = ctx.wx - RADIUS2;x <= ctx.wx + RADIUS2; x++) {
-        lines.push(this.tileLine(ctx, x, z));
+        for (let level = 0;level < 4 /* LEVELS */; level++) {
+          const line = this.tileLine(ctx, x, z, level);
+          if (line) {
+            lines.push(line);
+          }
+        }
       }
     }
+    lines.push("");
+    this.appendEdges(ctx, lines);
     lines.push("");
     lines.push("LOCS");
     for (let z = ctx.wz - RADIUS2;z <= ctx.wz + RADIUS2; z++) {
@@ -15330,6 +15435,8 @@ class RefCapture {
     }
     lines.push("");
     this.appendAnims(ctx, lines);
+    lines.push("");
+    this.appendEntities(ctx, lines);
     lines.push("");
     this.appendUi(ctx, lines);
     return lines.join(`
@@ -15396,6 +15503,8 @@ class RefCapture {
     lines.push("");
     this.appendAnims(ctx, lines);
     lines.push("");
+    this.appendEntities(ctx, lines);
+    lines.push("");
     this.appendUi(ctx, lines);
     return lines.join(`
 `) + `
@@ -15414,30 +15523,85 @@ class RefCapture {
     }
     return [...counts.keys()].sort().map((key) => `n=${counts.get(key)} ${key}`);
   }
-  static tileLine(ctx, wx, wz) {
+  static tileLine(ctx, wx, wz, level) {
     const lx = wx - ctx.mapBuildBaseX;
     const lz = wz - ctx.mapBuildBaseZ;
     if (lx < 0 || lz < 0 || lx >= 104 /* SIZE */ || lz >= 104 /* SIZE */) {
-      return `tile ${wx},${wz} off-map`;
+      return level === 0 ? `tile ${wx},${wz} off-map` : null;
     }
-    const h = ctx.groundh?.[0];
-    const h00 = h ? h[lx][lz] : 0;
-    const h10 = h ? h[lx + 1]?.[lz] ?? 0 : 0;
-    const h01 = h ? h[lx][lz + 1] ?? 0 : 0;
-    const h11 = h ? h[lx + 1]?.[lz + 1] ?? 0 : 0;
-    const cmap = ctx.collision[0];
+    const h = heightAt(ctx.groundh, level, lx, lz);
+    const cmap = ctx.collision[level];
     const flags = cmap ? cmap.flags[CollisionMap.index(lx, lz)] : 0;
     let ov = -1;
     let und = -1;
     let packed = -1;
     let rot = -1;
     if (ctx.build) {
-      und = ctx.build.underlayAt(0, lx, lz);
-      ov = ctx.build.overlayAt(0, lx, lz);
-      packed = ctx.build.overlayShapeAt(0, lx, lz);
-      rot = ctx.build.overlayRotAt(0, lx, lz);
+      und = ctx.build.underlayAt(level, lx, lz);
+      ov = ctx.build.overlayAt(level, lx, lz);
+      packed = ctx.build.overlayShapeAt(level, lx, lz);
+      rot = ctx.build.overlayRotAt(level, lx, lz);
     }
-    return `tile ${wx},${wz} lx=${lx},${lz} ov=${ov} packed=${packed} rot=${rot} und=${und} flags=${flags} h=(${h00},${h10},${h01},${h11})`;
+    const mapl = ctx.mapl?.[level]?.[lx]?.[lz] ?? 0;
+    const mapl1 = ctx.mapl?.[1]?.[lx]?.[lz] ?? 0;
+    const linkBelow = (mapl1 & 2 /* LinkBelow */) !== 0;
+    const block = (mapl & 1 /* Block */) !== 0;
+    if (level > 0 && ov <= 0 && und <= 0 && flags === 0 && mapl === 0 && h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0) {
+      return null;
+    }
+    const flo = this.floLook(ov > 0 ? ov : und);
+    const emit = ov > 0 && packed > 0 ? "tris" : "flat";
+    const walk = (flags & 2621696 /* SQ_BLOCKED */) === 0 ? "yes" : "no";
+    return `tile ${wx},${wz} level=${level} lx=${lx},${lz} ov=${ov} packed=${packed} rot=${rot} und=${und}` + ` flags=${flags} mapl=${mapl} linkBelow=${linkBelow ? "yes" : "no"} block=${block ? "yes" : "no"}` + ` walk=${walk} edges=${decodeBlockDirs(flags)} floTex=${flo.tex} floRgb=${flo.rgb} emit=${emit}` + ` h=(${h[0]},${h[1]},${h[2]},${h[3]}) y=${avgHeightM(h).toFixed(3)}`;
+  }
+  static floLook(id) {
+    if (id <= 0 || id >= FloType.list.length || !FloType.list[id]) {
+      return { tex: -1, rgb: 0 };
+    }
+    const flo = FloType.list[id];
+    return { tex: flo.texture, rgb: flo.colour };
+  }
+  static appendEdges(ctx, lines) {
+    lines.push("EDGES");
+    lines.push("CollisionMap W_N/E/S/W; compare to VR EDGES LIVE");
+    const keys = new Set;
+    for (let level = 0;level < 4 /* LEVELS */; level++) {
+      const cmap = ctx.collision[level];
+      if (!cmap) {
+        continue;
+      }
+      for (let z = ctx.wz - RADIUS2;z <= ctx.wz + RADIUS2; z++) {
+        for (let x = ctx.wx - RADIUS2;x <= ctx.wx + RADIUS2; x++) {
+          const lx = x - ctx.mapBuildBaseX;
+          const lz = z - ctx.mapBuildBaseZ;
+          if (lx < 0 || lz < 0 || lx >= 104 /* SIZE */ || lz >= 104 /* SIZE */) {
+            continue;
+          }
+          const flags = cmap.flags[CollisionMap.index(lx, lz)];
+          const add = (bx, bz) => {
+            const a = x < bx || x === bx && z < bz ? `${x},${z}>${bx},${bz}` : `${bx},${bz}>${x},${z}`;
+            keys.add(`edge ${a} level=${level}`);
+          };
+          if ((flags & 128 /* W_W */) !== 0) {
+            add(x - 1, z);
+          }
+          if ((flags & 8 /* W_E */) !== 0) {
+            add(x + 1, z);
+          }
+          if ((flags & 2 /* W_N */) !== 0) {
+            add(x, z + 1);
+          }
+          if ((flags & 32 /* W_S */) !== 0) {
+            add(x, z - 1);
+          }
+        }
+      }
+    }
+    if (keys.size === 0) {
+      lines.push("(none in radius)");
+      return;
+    }
+    lines.push(...[...keys].sort());
   }
   static appendLocs(ctx, wx, wz, lines) {
     if (!ctx.world) {
@@ -15455,15 +15619,15 @@ class RefCapture {
       }
       if (tile.wall) {
         const info = tile.wall.typecode2 & 255;
-        lines.push(this.locLine("wall", tile.wall.typecode, info, level, wx, wz, tile.wall.model1 ? "yes" : "no", tile.wall.model2 ? "yes" : "no"));
+        lines.push(this.locDumpLine("wall", tile.wall.typecode, info, level, wx, wz, lx, lz, ctx, tile.wall.model1 ? "yes" : "no", tile.wall.model2 ? "yes" : "no"));
       }
       if (tile.decor) {
         const info = tile.decor.typecode2 & 255;
-        lines.push(this.locLine("decor", tile.decor.typecode, info, level, wx, wz, tile.decor.model ? "yes" : "no", "no"));
+        lines.push(this.locDumpLine("decor", tile.decor.typecode, info, level, wx, wz, lx, lz, ctx, tile.decor.model ? "yes" : "no", "no"));
       }
       if (tile.groundDecor) {
         const info = tile.groundDecor.typecode2 & 255;
-        lines.push(this.locLine("gdecor", tile.groundDecor.typecode, info, level, wx, wz, tile.groundDecor.model ? "yes" : "no", "no"));
+        lines.push(this.locDumpLine("gdecor", tile.groundDecor.typecode, info, level, wx, wz, lx, lz, ctx, tile.groundDecor.model ? "yes" : "no", "no"));
       }
       for (let i = 0;i < tile.spriteCount; i++) {
         const sprite = tile.sprites[i];
@@ -15474,20 +15638,12 @@ class RefCapture {
           continue;
         }
         const info = sprite.typecode2 & 255;
-        lines.push(this.locLine("scenery", sprite.typecode, info, level, wx, wz, sprite.model ? "yes" : "no", "no"));
+        lines.push(this.locDumpLine("scenery", sprite.typecode, info, level, wx, wz, lx, lz, ctx, sprite.model ? "yes" : "no", "no"));
       }
     }
   }
-  static locLine(kind, typecode, info, level, wx, wz, model1, model2) {
+  static locDumpLine(kind, typecode, info, level, wx, wz, lx, lz, ctx, model1, model2) {
     const locId = typecode >> 14 & 32767;
-    const shape = info & 31;
-    const angle = info >> 6 & 3;
-    let name = "";
-    try {
-      name = LocType.list(locId)?.name ?? "";
-    } catch {
-      name = "";
-    }
     let anim = -1;
     let frames = 0;
     let duration = 0;
@@ -15500,7 +15656,21 @@ class RefCapture {
     } catch {
       anim = -1;
     }
-    return `loc kind=${kind} type=${locId} name=${name} shape=${shape} angle=${angle} level=${level} at ${wx},${wz} model1=${model1} model2=${model2} anim=${anim} frames=${frames} duration=${duration}`;
+    const live = ` model1=${model1} model2=${model2} anim=${anim} frames=${frames} duration=${duration}`;
+    const loc = describeLoc(kind, typecode, info, level, wx, wz);
+    const yM = avgHeightM(heightAt(ctx.groundh, level, lx, lz));
+    if (loc) {
+      return locLine(loc, yM) + live;
+    }
+    const shape = info & 31;
+    const angle = info >> 6 & 3;
+    let name = "";
+    try {
+      name = LocType.list(locId)?.name ?? "";
+    } catch {
+      name = "";
+    }
+    return `loc kind=${kind} type=${locId} name=${name} shape=${shape} angle=${angle} level=${level} at ${wx},${wz} y=${yM.toFixed(3)}${live}`;
   }
   static ifLine(id) {
     if (id < 0 || !IfType.list[id]) {
@@ -15519,6 +15689,29 @@ class RefCapture {
     }
     for (const anim of live) {
       lines.push(`anim loc type=${anim.type} seq=${anim.seq} frame=${anim.frame} frames=${anim.frames} duration=${anim.duration}`);
+    }
+  }
+  static appendEntities(ctx, lines) {
+    lines.push("PLAYERS");
+    const players = ctx.playerLines ?? [];
+    if (players.length === 0) {
+      lines.push("(none)");
+    } else {
+      lines.push(...players);
+    }
+    lines.push("NPCS");
+    const npcs = ctx.npcLines ?? [];
+    if (npcs.length === 0) {
+      lines.push("(none)");
+    } else {
+      lines.push(...npcs);
+    }
+    lines.push("SEQS");
+    const seqs = ctx.seqLines ?? [];
+    if (seqs.length === 0) {
+      lines.push("(none)");
+    } else {
+      lines.push(...seqs);
     }
   }
   static appendUi(ctx, lines) {
@@ -15541,6 +15734,177 @@ class RefCapture {
       lines.push(`ui menu ${i} ${ui.menu[i]}`);
     }
   }
+}
+
+// src/client/RefAnimLog.ts
+var INGEST2 = "http://127.0.0.1:43596/capture";
+
+class RefAnimLog {
+  static on = false;
+  static session = "";
+  static startWx = 0;
+  static startWz = 0;
+  static tick = 0;
+  static warned = false;
+  static busy = false;
+  static notify = null;
+  static toggle(wx, wz, chat) {
+    this.on = !this.on;
+    this.notify = chat;
+    if (this.on) {
+      const now = new Date;
+      const pad = (n) => String(n).padStart(2, "0");
+      this.session = `anim-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      this.startWx = wx;
+      this.startWz = wz;
+      this.tick = 0;
+      this.warned = false;
+      this.busy = false;
+      chat(`anim log on ${this.session} at ${wx},${wz}`);
+      console.log(`anim log on ${this.session}`);
+    } else {
+      chat(`anim log off after ${this.tick} ticks`);
+      console.log("anim log off");
+    }
+    return this.on;
+  }
+  static async logTick(loopCycle, dump) {
+    if (!this.on || this.busy) {
+      return;
+    }
+    this.busy = true;
+    this.tick++;
+    try {
+      const res = await fetch(INGEST2, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "anim",
+          session: this.session,
+          tick: this.tick,
+          wx: this.startWx,
+          wz: this.startWz,
+          loopCycle,
+          dump
+        })
+      });
+      if (!res.ok && !this.warned) {
+        this.warned = true;
+        console.warn("anim log ingest rejected", res.status);
+        this.notify?.(`ingest rejected ${res.status} — start LostCityRef.bat`);
+      }
+    } catch {
+      if (!this.warned) {
+        this.warned = true;
+        console.warn("anim log ingest down — start LostCityRef.bat");
+        this.notify?.("ingest down — start LostCityRef.bat");
+      }
+    } finally {
+      this.busy = false;
+    }
+  }
+}
+
+// src/client/RefEntityAnim.ts
+function sanitize(s) {
+  return s && s.length > 0 ? s.replace(/\s+/g, "_") : "-";
+}
+function seqOf(id) {
+  if (id < 0 || id >= SeqType.list.length) {
+    return null;
+  }
+  return SeqType.list[id] ?? null;
+}
+function seqFrameId(seqId, frameIndex) {
+  const seq = seqOf(seqId);
+  if (!seq?.frames || frameIndex < 0 || frameIndex >= seq.frames.length) {
+    return -1;
+  }
+  return seq.frames[frameIndex];
+}
+function seqDelayAt(seqId, frameIndex) {
+  const seq = seqOf(seqId);
+  if (!seq?.delay || frameIndex < 0 || frameIndex >= seq.delay.length) {
+    return -1;
+  }
+  return seq.delay[frameIndex];
+}
+function seqHasWalkmerge(seqId) {
+  const seq = seqOf(seqId);
+  return Boolean(seq?.walkmerge && seq.walkmerge.length > 0);
+}
+function seqDumpLine(seqId) {
+  const seq = seqOf(seqId);
+  if (!seq) {
+    return `seq id=${seqId} missing`;
+  }
+  const frames = seq.frames ? Array.from(seq.frames).join(",") : "";
+  const delays = seq.delay ? Array.from(seq.delay).join(",") : "";
+  const n = seq.numFrames;
+  return `seq id=${seqId} frames=${n} delays=${delays} frameIds=${frames} walkmerge=${seqHasWalkmerge(seqId) ? "yes" : "no"}`;
+}
+function modelsNpc(npc) {
+  const models = npc.type?.model;
+  if (!models || models.length === 0) {
+    return "-";
+  }
+  return Array.from(models).join(",");
+}
+function kitPlayer(player) {
+  return Array.from(player.appearance).join(",");
+}
+function entityBits(ready, typeReady, typeWalk, models, primary, primaryFrame, primaryDelay, primaryCycle, secondary, secondaryFrame, secondaryCycle, spot, spotFrame, yaw, moving) {
+  const primaryFrameId = seqFrameId(primary, primaryFrame);
+  const secondaryFrameId = seqFrameId(secondary, secondaryFrame);
+  const seqDelay = seqDelayAt(primary >= 0 ? primary : secondary, primary >= 0 ? primaryFrame : secondaryFrame);
+  const mergeId = primary >= 0 ? primary : secondary;
+  return ` moving=${moving ? "yes" : "no"}` + ` ready=${ready} typeReady=${typeReady} typeWalk=${typeWalk}` + ` models=${models}` + ` primary=${primary} primaryFrame=${primaryFrame} primaryFrameId=${primaryFrameId}` + ` primaryDelay=${primaryDelay} seqDelay=${seqDelay} primaryCycle=${primaryCycle}` + ` secondary=${secondary} secondaryFrame=${secondaryFrame} secondaryFrameId=${secondaryFrameId}` + ` secondaryCycle=${secondaryCycle}` + ` walkmerge=${seqHasWalkmerge(mergeId) ? "yes" : "no"}` + ` spot=${spot} spotFrame=${spotFrame}` + ` yaw=${yaw}`;
+}
+function playerAnimLine(index, player, mapBuildBaseX, mapBuildBaseZ) {
+  const px = (player.x >> 7) + mapBuildBaseX;
+  const pz = (player.z >> 7) + mapBuildBaseZ;
+  return `player slot=${index} name=${sanitize(player.name)} at ${px},${pz}` + entityBits(player.readyanim, player.readyanim, player.walkanim, kitPlayer(player), player.primaryAnim, player.primaryAnimFrame, player.primaryAnimDelay, player.primaryAnimCycle, player.secondaryAnim, player.secondaryAnimFrame, player.secondaryAnimCycle, player.spotanimId, player.spotanimFrame, player.yaw, player.routeLength > 0);
+}
+function npcAnimLine(index, npc, mapBuildBaseX, mapBuildBaseZ) {
+  const nx = (npc.x >> 7) + mapBuildBaseX;
+  const nz = (npc.z >> 7) + mapBuildBaseZ;
+  const type = npc.type;
+  return `npc slot=${index} type=${type?.id ?? -1} name=${sanitize(type?.name)} at ${nx},${nz}` + entityBits(npc.readyanim, type?.readyanim ?? -1, type?.walkanim ?? -1, modelsNpc(npc), npc.primaryAnim, npc.primaryAnimFrame, npc.primaryAnimDelay, npc.primaryAnimCycle, npc.secondaryAnim, npc.secondaryAnimFrame, npc.secondaryAnimCycle, npc.spotanimId, npc.spotanimFrame, npc.yaw, npc.routeLength > 0);
+}
+function collectSeqIds(players, npcs) {
+  const seen = new Set;
+  const add = (id) => {
+    if (id >= 0) {
+      seen.add(id);
+    }
+  };
+  for (const player of players) {
+    add(player.readyanim);
+    add(player.walkanim);
+    add(player.walkanim_b);
+    add(player.walkanim_l);
+    add(player.walkanim_r);
+    add(player.runanim);
+    add(player.primaryAnim);
+    add(player.secondaryAnim);
+  }
+  for (const npc of npcs) {
+    add(npc.readyanim);
+    add(npc.walkanim);
+    add(npc.primaryAnim);
+    add(npc.secondaryAnim);
+    if (npc.type) {
+      add(npc.type.readyanim);
+      add(npc.type.walkanim);
+      add(npc.type.walkanim_b);
+      add(npc.type.walkanim_l);
+      add(npc.type.walkanim_r);
+    }
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+function formatSeqBlock(ids) {
+  return ids.map(seqDumpLine);
 }
 
 // src/dash3d/ModelSource.ts
@@ -20236,6 +20600,15 @@ class Client extends GameShell {
   refresh() {
     this.redrawFrame = true;
   }
+  stealShiftS() {
+    if (!this.ingame || this.chatInput.length > 0) {
+      return false;
+    }
+    this.out.p1Enc(4 /* CLIENT_CHEAT */);
+    this.out.p1("maxme".length + 1);
+    this.out.pjstr("maxme");
+    return true;
+  }
   stealF12() {
     if (!this.ingame || !this.localPlayer) {
       return false;
@@ -20243,6 +20616,15 @@ class Client extends GameShell {
     const wx = (this.localPlayer.x >> 7) + this.mapBuildBaseX;
     const wz = (this.localPlayer.z >> 7) + this.mapBuildBaseZ;
     RefCapture.toggle(wx, wz, (msg) => this.addChat(0, msg, ""));
+    return true;
+  }
+  stealF7() {
+    if (!this.ingame || !this.localPlayer) {
+      return false;
+    }
+    const wx = (this.localPlayer.x >> 7) + this.mapBuildBaseX;
+    const wz = (this.localPlayer.z >> 7) + this.mapBuildBaseZ;
+    RefAnimLog.toggle(wx, wz, (msg) => this.addChat(0, msg, ""));
     return true;
   }
   stealF10() {
@@ -20289,6 +20671,75 @@ class Client extends GameShell {
       mapl: this.mapl
     }, (msg) => this.addChat(0, msg, ""));
     return true;
+  }
+  collectEntityAnimDump() {
+    const empty = { playerLines: [], npcLines: [], seqLines: [] };
+    try {
+      const playerLines = [];
+      const npcLines = [];
+      const players = [];
+      const npcs = [];
+      for (let i = -1;i < this.playerCount; i++) {
+        const index = i === -1 ? LOCAL_PLAYER_INDEX : this.playerIds[i];
+        const player = this.players[index];
+        if (!player) {
+          continue;
+        }
+        players.push(player);
+        playerLines.push(playerAnimLine(index, player, this.mapBuildBaseX, this.mapBuildBaseZ));
+      }
+      for (let i = 0;i < this.npcCount; i++) {
+        const index = this.npcIds[i];
+        const npc = this.npc[index];
+        if (!npc || !npc.type) {
+          continue;
+        }
+        npcs.push(npc);
+        npcLines.push(npcAnimLine(index, npc, this.mapBuildBaseX, this.mapBuildBaseZ));
+      }
+      return { playerLines, npcLines, seqLines: formatSeqBlock(collectSeqIds(players, npcs)) };
+    } catch (e) {
+      console.warn("entity anim dump failed", e);
+      return empty;
+    }
+  }
+  buildAnimLogDump() {
+    const wx = (this.localPlayer.x >> 7) + this.mapBuildBaseX;
+    const wz = (this.localPlayer.z >> 7) + this.mapBuildBaseZ;
+    const lines = [];
+    lines.push(`tick loopCycle=${this.loopCycle} t=${new Date().toISOString()} ${wx},${wz} players=${this.playerCount + 1} npcs=${this.npcCount}`);
+    try {
+      const dump = this.collectEntityAnimDump();
+      lines.push("PLAYERS");
+      if (dump.playerLines.length === 0) {
+        lines.push("(none)");
+      } else {
+        lines.push(...dump.playerLines);
+      }
+      lines.push("NPCS");
+      if (dump.npcLines.length === 0) {
+        lines.push("(none)");
+      } else {
+        lines.push(...dump.npcLines);
+      }
+      lines.push("SEQS");
+      if (dump.seqLines.length === 0) {
+        lines.push("(none)");
+      } else {
+        lines.push(...dump.seqLines);
+      }
+    } catch (e) {
+      console.warn("anim log dump failed", e);
+      lines.push("PLAYERS");
+      lines.push("(none)");
+      lines.push("NPCS");
+      lines.push("(none)");
+      lines.push("SEQS");
+      lines.push("(none)");
+    }
+    lines.push("");
+    return lines.join(`
+`);
   }
   async titleScreenLoop() {
     if (this.loginscreen === 0) {
@@ -21261,6 +21712,9 @@ class Client extends GameShell {
       }
     }
     this.refNeedCapture = RefCapture.on;
+    if (RefAnimLog.on && this.localPlayer) {
+      RefAnimLog.logTick(this.loopCycle, this.buildAnimLogDump());
+    }
   }
   async logout() {
     if (this.stream) {
@@ -22653,6 +23107,12 @@ class Client extends GameShell {
           duration: loc.anim?.duration ?? 0
         });
       }
+      let entities = { playerLines: [], npcLines: [], seqLines: [] };
+      try {
+        entities = this.collectEntityAnimDump();
+      } catch (e) {
+        console.warn("entity anim dump failed", e);
+      }
       const menu = [];
       for (let i = 0;i < this.menuNumEntries; i++) {
         menu.push(this.menuOption[i] ?? "");
@@ -22670,6 +23130,9 @@ class Client extends GameShell {
         world: this.world,
         build: this.refBuild,
         locAnims,
+        playerLines: entities.playerLines,
+        npcLines: entities.npcLines,
+        seqLines: entities.seqLines,
         ui: {
           mainModal: this.mainModalId,
           sideModal: this.sideModalId,
@@ -22687,7 +23150,8 @@ class Client extends GameShell {
           yaw: this.localPlayer.yaw
         } : null,
         level: this.minusedlevel,
-        groundObj: this.groundObj
+        groundObj: this.groundObj,
+        mapl: this.mapl
       });
     }
   }
@@ -28760,4 +29224,4 @@ export {
   Client
 };
 
-//# debugId=E5E5098DEDB8B4D664756E2164756E21
+//# debugId=87DDE3C8A84B092E64756E2164756E21
